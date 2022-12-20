@@ -1108,7 +1108,7 @@ CREATE OR REPLACE FUNCTION _rrule.vevent_to_exception_rruleset("input" text, "fa
 RETURNS _rrule.EXCEPTION_RRULESET AS $$
 	WITH "occurrence-id-line" AS (SELECT _rrule.parse_line("input", 'RECURRENCE-ID') as "x")
 	SELECT
-		_rrule.vevent_to_valid_rruleset("input", "fallback") "rruleset",
+		_rrule.vevent_to_rruleset("input", "fallback") "rruleset",
 		(SELECT "x"::TIMESTAMP FROM "occurrence-id-line" LIMIT 1) "recurrence_id"
 	;
 $$ LANGUAGE SQL STRICT IMMUTABLE;
