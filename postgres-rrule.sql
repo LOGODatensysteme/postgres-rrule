@@ -1180,3 +1180,22 @@ END:VEVENT',
 '2099-12-31T23:59:59Z'::TIMESTAMP
 ), '(2022-01-01,2099-12-31)'::tsrange);
 */
+
+CREATE OR REPLACE FUNCTION _rrule.vevents_to_occurrences("input" TEXT, "range" TSRANGE)
+RETURNS SETOF TIMESTAMP AS $$
+	SELECT _rrule.occurrences(
+		_rrule.vevents_to_rruleset_array("input", upper("range")),
+		"range"
+	);
+$$ LANGUAGE SQL STRICT IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION _rrule.vevents_to_occurrence_range("input" TEXT, "range" TSRANGE)
+RETURNS TSRANGE AS $$
+	WITH "occurrences" AS (
+		SELECT _rrule.occurrences(
+			_rrule.vevents_to_rruleset_array("input", upper("range")),
+			"range"
+		)
+	)
+	SELECT TSRANGE(MIN("occurrences"), MAX("occurrences")) FROM "occurrences";
+$$ LANGUAGE SQL STRICT IMMUTABLE;
