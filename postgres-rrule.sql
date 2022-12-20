@@ -1026,3 +1026,157 @@ CREATE CAST (_rrule.RRULE AS jsonb)
   WITH FUNCTION _rrule.rrule_to_jsonb(_rrule.RRULE)
   AS IMPLICIT;
 
+-- starting from here, the volkanunsal's code is amended by functions to support parsing multiple VEVENTs, with the first one being the "main" VEVENT holding an RRULE and all others being exceptions (identified by RECURRENCE-ID)
+
+-- add fallback value for "until" if necessary (because _rrule does not support events repeating indefinitely)
+CREATE OR REPLACE FUNCTION _rrule.enforce_valid_rrule(_rrule.RRULE, TIMESTAMP)
+RETURNS _rrule.RRULE AS $$
+  SELECT
+    $1."freq",
+    $1."interval",
+    $1."count",
+    COALESCE($1."until", $2) "until",
+    $1."bysecond",
+    $1."byminute",
+    $1."byhour",
+    $1."byday",
+    $1."bymonthday",
+    $1."byyearday",
+    $1."byweekno",
+    $1."bymonth",
+    $1."bysetpos",
+    $1."wkst";
+$$ LANGUAGE SQL IMMUTABLE STRICT;
+
+-- add default value for "rrule" (which is a rule that in practice never creates a follow-up event)
+CREATE OR REPLACE FUNCTION _rrule.enforce_valid_rruleset(_rrule.RRULESET, TIMESTAMP)
+RETURNS _rrule.RRULESET AS $$
+  SELECT
+    $1."dtstart",
+    $1."dtend",
+    _rrule.enforce_valid_rrule($1."rrule", $2) "rrule",
+    $1."exrule",
+    $1."rdate",
+    $1."exdate";
+$$ LANGUAGE SQL IMMUTABLE STRICT;
+
+-- parse VEVENT with defaults and fallbacks in place
+CREATE OR REPLACE FUNCTION _rrule.vevent_to_rruleset("input" TEXT, "fallback" TIMESTAMP)
+RETURNS _rrule.RRULESET AS $$
+SELECT _rrule.enforce_valid_rruleset(
+  CASE
+    WHEN input LIKE '%RRULE:%'
+    THEN input::_rrule.RRULESET
+    ELSE CONCAT(
+	  input,
+		'
+RRULE:FREQ=YEARLY;INTERVAL=10000;UNTIL=',
+		TO_CHAR("fallback", 'YYYYMMDD'),
+		'T',
+		TO_CHAR("fallback", 'HH24MISS')
+	)::_rrule.RRULESET
+  END,
+  "fallback"
+);
+$$ LANGUAGE SQL STRICT IMMUTABLE;
+
+/*
+select _rrule.vevent_to_rruleset('BEGIN:VEVENT
+DTSTART:20221216T200000
+DURATION:PT60M
+RRULE:FREQ=DAILY;UNTIL=20221218T225959Z
+END:VEVENT',
+'2099-12-31T23:59:59Z'::TIMESTAMP
+);
+
+select _rrule.vevent_to_rruleset(
+	'BEGIN:VEVENT
+DTSTART:20221216T200000
+DURATION:PT60M
+END:VEVENT',
+	'2099-12-31T23:59:59Z'::TIMESTAMP
+);
+*/
+
+-- amendment to _rrule.RRULESET in order not to change the original API
+CREATE TYPE _rrule.EXCEPTION_RRULESET AS (
+  "rruleset" _rrule.RRULESET,
+  "recurrence_id" TIMESTAMP
+);
+
+CREATE OR REPLACE FUNCTION _rrule.vevent_to_exception_rruleset("input" text, "fallback" TIMESTAMP)
+RETURNS _rrule.EXCEPTION_RRULESET AS $$
+	WITH "occurrence-id-line" AS (SELECT _rrule.parse_line("input", 'RECURRENCE-ID') as "x")
+	SELECT
+		_rrule.vevent_to_valid_rruleset("input", "fallback") "rruleset",
+		(SELECT "x"::TIMESTAMP FROM "occurrence-id-line" LIMIT 1) "recurrence_id"
+	;
+$$ LANGUAGE SQL STRICT IMMUTABLE;
+
+/*
+SELECT _rrule.vevent_to_exception_rruleset('BEGIN:VEVENT
+DTSTART:20221217T210000
+DURATION:PT60M
+RECURRENCE-ID:20221217T200000
+END:VEVENT',
+'2099-12-31T23:59:59Z'::TIMESTAMP
+);
+*/
+
+-- the main function to parse multiple VEVENTs contained in one string
+CREATE OR REPLACE FUNCTION _rrule.vevents_to_rruleset_array(TEXT, TIMESTAMP)
+RETURNS _rrule.RRULESET[] AS $$
+DECLARE
+  vevent TEXT;
+  main_rruleset jsonb;
+  exception_rruleset _rrule.EXCEPTION_RRULESET;
+  first BOOLEAN := TRUE;
+  exception_rrulesets _rrule.RRULESET[] := '{}'::_rrule.RRULESET[];
+BEGIN
+  FOREACH vevent IN ARRAY string_to_array($1, 'END:VEVENT', '')
+  LOOP
+	CONTINUE WHEN vevent IS NULL;
+	
+	IF first
+		THEN
+			main_rruleset := _rrule.rruleset_to_jsonb(_rrule.vevent_to_rruleset(vevent, $2));
+			main_rruleset := jsonb_set(main_rruleset, '{exdate}'::text[], jsonb_build_array());
+			first := FALSE;
+		ELSE
+			exception_rruleset := _rrule.vevent_to_exception_rruleset(vevent, $2);
+			exception_rrulesets := array_append(exception_rrulesets, exception_rruleset."rruleset");
+			main_rruleset := jsonb_insert(main_rruleset, '{exdate,0}', to_jsonb(exception_rruleset."recurrence_id"));
+	END IF;
+  END LOOP;
+
+  RETURN (SELECT _rrule.jsonb_to_rruleset(main_rruleset) || exception_rrulesets);
+END;
+$$ LANGUAGE plpgsql IMMUTABLE STRICT;
+
+/*
+select _rrule.vevents_to_rruleset_array('BEGIN:VEVENT
+DTSTART:20221216T200000
+DURATION:PT60M
+RRULE:FREQ=DAILY;UNTIL=20221218T225959Z
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:20221217T210000
+DURATION:PT60M
+RECURRENCE-ID:20221217T200000
+END:VEVENT',
+'2099-12-31T23:59:59Z'::TIMESTAMP
+);
+
+select _rrule.occurrences(_rrule.vevents_to_rruleset_array('BEGIN:VEVENT
+DTSTART:20221216T200000
+DURATION:PT60M
+RRULE:FREQ=DAILY;UNTIL=20221218T225959Z
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:20221217T210000
+DURATION:PT60M
+RECURRENCE-ID:20221217T200000
+END:VEVENT',
+'2099-12-31T23:59:59Z'::TIMESTAMP
+), '(2022-01-01,2099-12-31)'::tsrange);
+*/
