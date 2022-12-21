@@ -1197,5 +1197,5 @@ RETURNS TSRANGE AS $$
 			"range"
 		)
 	)
-	SELECT TSRANGE(MIN("occurrences"), MAX("occurrences")) FROM "occurrences";
+	SELECT TSRANGE(MIN("occurrences"), MAX("occurrences"), '[]') FROM "occurrences";
 $$ LANGUAGE SQL STRICT IMMUTABLE;
