@@ -1132,8 +1132,10 @@ DECLARE
   exception_rruleset _rrule.EXCEPTION_RRULESET;
   first BOOLEAN := TRUE;
   exception_rrulesets _rrule.RRULESET[] := '{}'::_rrule.RRULESET[];
+  component_name TEXT;
 BEGIN
-  FOREACH vevent IN ARRAY string_to_array($1, 'END:VEVENT', '')
+  component_name := (regexp_matches($1, '^BEGIN:(\w+)'))[1];
+  FOREACH vevent IN ARRAY string_to_array($1, concat('END:', component_name), '')
   LOOP
 	CONTINUE WHEN vevent IS NULL;
 	
